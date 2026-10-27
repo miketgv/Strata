@@ -357,6 +357,18 @@ class StoredTuning(Base):
         seen, started = self.run_tune(self.runner_for_tune())
         self.assertTrue(started)
 
+    def test_a_big_model_gets_a_longer_start_wait_by_itself(self):                    # #3949 #3459
+        r = self.runner_for_tune()
+        row = type("Row", (), {"family": r.s.family, "model": r.s.model, "download_gb": 20.0})
+        with mock.patch.object(r.catalog, "rows", return_value=[row]):
+            self.assertEqual(r.start_wait(), 600)                                    # a small model keeps ten minutes
+        row.download_gb = 250.0
+        with mock.patch.object(r.catalog, "rows", return_value=[row]):
+            self.assertEqual(r.start_wait(), 1800)                                   # 600 + 210 x 8, capped at 30 minutes
+        row.download_gb = 83.0
+        with mock.patch.object(r.catalog, "rows", return_value=[row]):
+            self.assertEqual(r.start_wait(), 944)
+
     def test_a_stored_result_is_used_and_said(self):
         saved = self.store()
         r = self.runner_for_tune()
@@ -364,6 +376,7 @@ class StoredTuning(Base):
         self.assertFalse(started)
         text = seen[-1]
         self.assertIn("already tuned for this computer", text)
+        self.assertIn("Add --retune to measure again", text)
         self.assertIn("Q2 32K - Full speed", text)
         self.assertIn("--retune", text)
         self.assertEqual(r.s.tuned_preset, saved["id"])
@@ -393,6 +406,42 @@ class StoredTuning(Base):
         self.assertEqual(json.loads(out)["plan"]["settings"]["tune"], "quick")
         code, out, err = run_cli(["launch", "--help"])
         self.assertIn("--retune", out)
+
+
+class StartWaitVariableInLaunch(Base):
+    """STRATA_ENGINE_READY_S sets how long `strata launch` waits for the model (#3817); the server's own engine wait is
+    raised with it, so it cannot give up first and leave the start waiting for nothing."""
+
+    def runner_for_wait(self, gb):
+        r = self.runner(family="qwen", model="Q2_0")
+        row = type("Row", (), {"family": r.s.family, "model": r.s.model, "download_gb": gb})
+        mock.patch.object(r.catalog, "rows", return_value=[row]).start()
+        self.addCleanup(mock.patch.stopall)
+        return r
+
+    def build(self, r, base: dict) -> dict:
+        installed = self.base / "strata-q2_0.json"
+        installed.write_text(json.dumps(base), encoding="utf-8")
+        return json.loads(r.build_config(installed).read_text())
+
+    def test_unset_keeps_the_size_based_wait(self):
+        r = self.runner_for_wait(20.0)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(r.start_wait(), 600)                     # the automatic figure does not read the variable
+            cfg = self.build(r, {"exe": "component:strata-engine", "args": [], "port": 8080})
+        self.assertNotIn("engine_ready_s", cfg)                       # 600 s: nothing extra is written
+
+    def test_the_variable_sets_the_wait_and_the_server_readies_after_it(self):
+        r = self.runner_for_wait(20.0)
+        with mock.patch.dict(os.environ, {"STRATA_ENGINE_READY_S": "2400"}, clear=True):
+            cfg = self.build(r, {"exe": "component:strata-engine", "args": [], "port": 8080})
+        self.assertEqual(cfg.get("engine_ready_s"), 2460)             # the start waits 2400 s, the server readies after it
+
+    def test_a_config_that_already_names_its_own_wait_is_left_alone(self):
+        r = self.runner_for_wait(20.0)
+        with mock.patch.dict(os.environ, {"STRATA_ENGINE_READY_S": "2400"}, clear=True):
+            cfg = self.build(r, {"exe": "component:strata-engine", "args": [], "port": 8080, "engine_ready_s": 3600})
+        self.assertEqual(cfg.get("engine_ready_s"), 3600)
 
 
 

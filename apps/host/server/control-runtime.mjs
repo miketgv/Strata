@@ -19,7 +19,6 @@ import { homedir } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-
 /** How long to wait for a model to start: STRATA_ENGINE_READY_S seconds when it is set to a positive number (the variable
  *  the server's own engine wait reads), else `fallback`. */
 export function startWaitSeconds(fallback) {
@@ -190,6 +189,12 @@ export function createControl({ control = findControl(), env = process.env, run 
       const failed = result.json?.results?.find?.(r => r.status === 'failed');
       if (failed) throw Object.assign(new ControlError(failed.error, { exitCode: failed.exit_code ?? result.code, output: result.json }), { code: result.code === 7 ? 'engine_serving' : 'update_failed' });
       throw failure(result, 'The update failed.');
+    },
+    /** Install an engine package the person downloaded and chose (the offline path): no network; Control checks the package's own signature. */
+    async installEngineFile(path, { onEvent = null, signal = null } = {}) {
+      const result = await call(['components', 'install-file', path, '--output', 'jsonl'], { timeoutMs: 3600_000, onLine: onEvent ?? (() => {}), signal });
+      if (result.json?.ok) return { ok: true, results: [result.json] };
+      throw failure(result, 'This file could not be installed.');
     },
     async rollbackEngine() {
       const result = await call(['components', 'rollback', '--output', 'json'], { timeoutMs: 120_000 });

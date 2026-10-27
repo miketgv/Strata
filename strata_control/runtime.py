@@ -40,25 +40,7 @@ except ImportError:  # Windows has no qualified owner transport yet.
 
 from strata_control import owner_transport, paths, posix_owner, private_files, procs, profiles, readiness, winproc
 from serve import launch_identity
-
 from strata_control.profiles import ProfileError
-
-START_WAIT_MAX = 600.0
-
-
-def ready_wait(default: float) -> float:
-    """How long to wait for a model to start: ``STRATA_ENGINE_READY_S`` seconds when it is set to a positive number
-    (the same variable the server's own engine wait reads), else ``default``."""
-    try:
-        value = float(os.environ.get("STRATA_ENGINE_READY_S") or 0)
-    except ValueError:
-        return default
-    return value if 0 < value < float("inf") else default
-
-
-def start_wait_max() -> float:
-    """The longest start wait accepted: 600 s, or the ``STRATA_ENGINE_READY_S`` wait when that asks for more."""
-    return max(START_WAIT_MAX, ready_wait(0))
 
 
 MAX_MESSAGE = 64 * 1024
@@ -533,6 +515,24 @@ def _check_start_candidate(name: str, expected_profile_revision: str | None,
     return plan, digest
 
 
+MAX_START_WAIT = 1800     # seconds a start may wait for the model: a 250 GB DeepSeek set on a slow disk needs more than 10 minutes (#3949)
+
+
+def ready_wait(default: float) -> float:
+    """How long to wait for a model to start: ``STRATA_ENGINE_READY_S`` seconds when it is set to a positive number
+    (the same variable the server's own engine wait reads), else ``default``."""
+    try:
+        value = float(os.environ.get("STRATA_ENGINE_READY_S") or 0)
+    except ValueError:
+        return default
+    return value if 0 < value < float("inf") else default
+
+
+def start_wait_max() -> float:
+    """The longest start wait accepted: ``MAX_START_WAIT``, or the ``STRATA_ENGINE_READY_S`` wait when that asks for more."""
+    return max(MAX_START_WAIT, ready_wait(0))
+
+
 def start(name: str, *, wait: float = 300, shutdown_timeout: float = 30,
           expected_profile_revision: str | None = None,
           expected_source_sha256: str | None = None,
@@ -724,9 +724,9 @@ def restart(name: str, *, timeout: float = 1000, startup_wait: float = 300,
             allow_source_switch: bool = False,
             allow_source_migration: bool = False,
             expected_source_sha256: str | None = None) -> dict:
-    if (not 1 <= timeout <= 1800 or not 1 <= startup_wait <= 600 or
+    if (not 1 <= timeout <= 1800 or not 1 <= startup_wait <= MAX_START_WAIT or
             type(allow_source_switch) is not bool or type(allow_source_migration) is not bool):
-        raise ProfileError("restart wait must be 1..1800 and startup wait 1..600 seconds")
+        raise ProfileError(f"restart wait must be 1..1800 and startup wait 1..{MAX_START_WAIT} seconds")
     if expected_source_sha256 is not None and (not isinstance(expected_source_sha256, str) or
                                                not re.fullmatch(r"[0-9a-f]{64}", expected_source_sha256)):
         raise ProfileError("expected source SHA-256 must be 64 lowercase hex characters")
@@ -1242,7 +1242,7 @@ class Host:
             return {**result, "profile": self.name}
         if command == "restart":
             startup_wait = request.get("startup_wait", 300)
-            if type(startup_wait) not in (int, float) or not 1 <= startup_wait <= 600:
+            if type(startup_wait) not in (int, float) or not 1 <= startup_wait <= MAX_START_WAIT:
                 return {"ok": False, "error": "invalid_startup_wait", "exit_code": 2}
             revision = request.get("expected_profile_revision")
             if revision is not None and (not isinstance(revision, str) or
